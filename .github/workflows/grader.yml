@@ -1,0 +1,149 @@
+name: Grader
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install dependencies
+        working-directory: starter-code
+        run: pnpm install
+
+      - name: Run tests
+        working-directory: starter-code
+        run: pnpm test
+
+      # ── Métrica: cyclomatic_complexity ────────────────────────────────────
+      - name: Check cyclomatic complexity
+        id: complexity
+        working-directory: starter-code
+        run: |
+          npx --yes complexity-report --format json --output cr-report.json src/ 2>/dev/null || true
+
+          MAX_CC=$(node -e "
+            const fs = require('fs');
+            try {
+              const r = JSON.parse(fs.readFileSync('cr-report.json','utf8'));
+              const funcs = r.reports.flatMap(f => f.functions || []);
+              if (!funcs.length) { console.log('999'); return; }
+              const max = Math.max(...funcs.map(f => f.complexity?.cyclomatic || 1));
+              console.log(max);
+            } catch { console.log('999'); }
+          " 2>/dev/null || echo "999")
+
+          PASSED=$([ "$(echo "$MAX_CC <= 15" | bc -l)" -eq 1 ] && echo true || echo false)
+          SCORE=$([ "$PASSED" = "true" ] && echo "1.0" || echo "0.0")
+
+          echo "max_cc=$MAX_CC" >> "$GITHUB_OUTPUT"
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+          echo "Max CC: $MAX_CC (threshold: 15)"
+
+      # ── Métrica: code_duplication ─────────────────────────────────────────
+      - name: Check code duplication
+        id: duplication
+        working-directory: starter-code
+        run: |
+          npx --yes jscpd src/ --min-tokens 50 --reporters json --output .jscpd 2>/dev/null || true
+
+          DUP_PCT=$(node -e "
+            const fs = require('fs');
+            try {
+              const r = JSON.parse(fs.readFileSync('.jscpd/jscpd-report.json','utf8'));
+              console.log((r.statistics.total.percentage || 0).toFixed(2));
+            } catch { console.log('0.00'); }
+          " 2>/dev/null || echo "0.00")
+
+          PASSED=$([ "$(echo "$DUP_PCT <= 5" | bc -l)" -eq 1 ] && echo true || echo false)
+          SCORE=$([ "$PASSED" = "true" ] && echo "1.0" || echo "0.0")
+
+          echo "duplication_pct=$DUP_PCT" >> "$GITHUB_OUTPUT"
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+          echo "Duplication: $DUP_PCT% (threshold: 5%)"
+
+      # ── Métrica: lint_violations ──────────────────────────────────────────
+      - name: Check lint violations
+        id: lint
+        working-directory: starter-code
+        run: |
+          npx eslint src/ --format json > lint-report.json 2>/dev/null || true
+
+          VIOLATIONS=$(node -e "
+            const fs = require('fs');
+            try {
+              const r = JSON.parse(fs.readFileSync('lint-report.json','utf8'));
+              const total = r.reduce((s, f) => s + f.errorCount, 0);
+              console.log(total);
+            } catch { console.log('0'); }
+          ")
+
+          PASSED=$([ "$VIOLATIONS" -eq 0 ] && echo true || echo false)
+          SCORE=$([ "$PASSED" = "true" ] && echo "1.0" || echo "0.0")
+
+          echo "violations=$VIOLATIONS" >> "$GITHUB_OUTPUT"
+          echo "score=$SCORE" >> "$GITHUB_OUTPUT"
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+          echo "Lint violations: $VIOLATIONS (threshold: 0)"
+
+      # ── Reporte final ─────────────────────────────────────────────────────
+      - name: Build grader report
+        run: |
+          cat > grader-report.json << EOF
+          {
+            "schemaVersion": "1.0",
+            "templateSlug": "code-quality",
+            "runId": "${{ github.run_id }}",
+            "sha": "${{ github.sha }}",
+            "metrics": [
+              {
+                "metricKey": "cyclomatic_complexity",
+                "score": ${{ steps.complexity.outputs.score }},
+                "passed": ${{ steps.complexity.outputs.passed }},
+                "unavailable": false,
+                "rawValue": ${{ steps.complexity.outputs.max_cc }}
+              },
+              {
+                "metricKey": "code_duplication",
+                "score": ${{ steps.duplication.outputs.score }},
+                "passed": ${{ steps.duplication.outputs.passed }},
+                "unavailable": false,
+                "rawValue": ${{ steps.duplication.outputs.duplication_pct }}
+              },
+              {
+                "metricKey": "lint_violations",
+                "score": ${{ steps.lint.outputs.score }},
+                "passed": ${{ steps.lint.outputs.passed }},
+                "unavailable": false,
+                "rawValue": ${{ steps.lint.outputs.violations }}
+              }
+            ]
+          }
+          EOF
+          cat grader-report.json
+
+      - name: Upload grader report
+        uses: actions/upload-artifact@v4
+        with:
+          name: grader-report
+          path: grader-report.json
